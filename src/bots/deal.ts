@@ -495,8 +495,7 @@ async function createListing(worker: WorkerInstance, state: DealState, userInfo:
       priceAsset: listing.priceAsset || 'USDC',
       inventory: listing.inventory || 1,
       deliverable: listing.deliverable !== undefined ? listing.deliverable : false,
-      // Default pickup zip to merchant's location or fallback
-      pickupZip: listing.pickupZip || userInfo?.merchant?.pickupZip || '10001'
+      pickupZip: listing.pickupZip !== undefined ? listing.pickupZip : '00000',
     };
 
     logger.debug(`[${name}] Created validated listing: title="${validatedListing.title}", price=${validatedListing.priceValue} ${validatedListing.priceAsset}, inventory=${validatedListing.inventory}, pickupZip=${validatedListing.pickupZip}, deliverable=${validatedListing.deliverable}`);
@@ -631,8 +630,8 @@ async function publishDeal(
       const productUrl = getProductUrl(subject.subject.subjectId);
       await removeReaction(conversation, messageId, '🏗️');
       buildingReactionSent = false;
-      
-      await conversation.send(`✅ Deal published! ${productUrl}`);
+      subject.subject.subjectId
+      await conversation.send(`Published deal #${subject.subject.subjectId} ${productUrl}`);
       
       // Cleanup
       publishableDeals.delete(messageId);
