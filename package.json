@@ -17,6 +17,16 @@
     "yarn": ">=1.22.0 <2.0.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.828.0",
+    "@aws-sdk/lib-storage": "^3.828.0",
+    "@aws-sdk/s3-request-presigner": "^3.828.0",
+    "@dotenvx/dotenvx": "^1.24.1",
+    "@hopscotch-trading/js-commons-core": "^0.3.190",
+    "@hopscotch-trading/js-commons-data": "^0.2.510",
+    "@xmtp/content-type-reaction": "^2.0.2",
+    "@xmtp/content-type-remote-attachment": "^2.0.2",
+    "@xmtp/content-type-reply": "^2.0.2",
+    "@xmtp/node-sdk": "^4.0.1",
     "ethers": "^6.13.4",
     "node-cache": "^5.1.2",
     "openai": "^5.3.0",
