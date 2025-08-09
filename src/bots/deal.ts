@@ -1,4 +1,4 @@
-// deal.ts - Fixed deal agent handler with proper reply chain image handling
+// deal.ts - Fixed deal agent handler with proper approval requirements
 import { getLogger } from '@hopscotch-trading/js-commons-core/utils';
 import { AppDB } from '@hopscotch-trading/js-commons-data';
 import { DecodedMessage } from '@xmtp/node-sdk';
@@ -212,18 +212,30 @@ async function handleReaction(
       approvalState.creatorApproved = true;
       logger.info(`[${name}] Creator ${address} approved deal ${targetMessageId}`);
       
-      // Publish immediately when creator approves (can be changed if you want to require other approvals)
-      await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
-    } else {
-      // Other user approval
-      approvalState.otherApprovals.add(address);
-      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total approvals: ${approvalState.otherApprovals.size}`);
+      // FIXED: Don't publish immediately when creator approves - wait for other approvals
+      logger.debug(`[${name}] Waiting for other approvals. Current other approvals: ${approvalState.otherApprovals.size}`);
       
       // Check if we can publish (creator + at least one other)
+      if (approvalState.otherApprovals.size >= 1) {
+        await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
+      } else {
+        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need at least 1)`);
+      }
+    } else {
+      // Other user approval - make sure they haven't already approved
+      if (approvalState.otherApprovals.has(address)) {
+        logger.debug(`[${name}] User ${address} has already approved deal ${targetMessageId}`);
+        return;
+      }
+      
+      approvalState.otherApprovals.add(address);
+      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total other approvals: ${approvalState.otherApprovals.size}`);
+      
+      // FIXED: Check if we can publish (creator + at least one other)
       if (approvalState.creatorApproved && approvalState.otherApprovals.size >= 1) {
         await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
       } else {
-        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size}`);
+        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need creator + at least 1 other)`);
       }
     }
   }

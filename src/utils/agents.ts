@@ -107,7 +107,7 @@ export async function validateUser(address: string) {
   try {
     logger.debug(`[agent-helpers] Validating user ${address}`);
     
-    address = "0xF69c8B1261b38352eAd7B91421dA38F5fd261EC9";
+    address = "0xF69c8B1261b38352eAd7B91421dA38F5fd261EC9"; // REMOVE FOR ACTUAL PRODUCTION
 
     const user = await AppDB.getUserByWallet(address);
     if (!user) {
@@ -496,21 +496,34 @@ export function getProductUrl(subjectId: number): string {
 }
 
 /**
- * Extract text content from text or reply messages
+ * IMPROVED: Extract text content from text or reply messages
  */
 export function extractTextContent(message: DecodedMessage): string {
-  if (message.contentType?.sameAs(ContentTypeText)) {
-    return message.content as string;
-  } else if (message.contentType?.sameAs(ContentTypeReply)) {
+  if (!message.contentType) {
+    logger.debug(`[extractTextContent] No content type for message ${message.id}`);
+    return '';
+  }
+
+  if (message.contentType.sameAs(ContentTypeText)) {
+    const content = message.content as string;
+    logger.debug(`[extractTextContent] Extracted text from text message: "${content}"`);
+    return content;
+  } else if (message.contentType.sameAs(ContentTypeReply)) {
     const replyContent = message.content as Reply;
+    
+    // Check if the reply content is text
     if (replyContent.contentType.sameAs(ContentTypeText)) {
-      return replyContent.content as string;
+      const content = replyContent.content as string;
+      logger.debug(`[extractTextContent] Extracted text from reply message: "${content}"`);
+      return content;
     } else {
-      logger.warn(`[agent-helpers] Reply content type is not text: ${replyContent.contentType.typeId}`);
+      logger.debug(`[extractTextContent] Reply content type is not text: ${replyContent.contentType.typeId}`);
       return '';
     }
+  } else {
+    logger.debug(`[extractTextContent] Unsupported content type: ${message.contentType.typeId}`);
+    return '';
   }
-  return '';
 }
 
 /**
@@ -546,7 +559,6 @@ export async function sendErrorResponse(
   }
 }
 
-// FIXED: Legacy function for backward compatibility with existing deal agent code
 export async function gatherMessageContent(
   conversation: any,
   message: DecodedMessage,
@@ -558,7 +570,8 @@ export async function gatherMessageContent(
   // Add the current message's text, cleaned of the @deal tag.
   const cleanedText = description.replace('@deal', '').trim();
   if (cleanedText) {
-    textParts.push(cleanedText); // Changed from unshift to push to maintain chronological order
+    textParts.push(cleanedText); // Add current message text first
+    logger.debug(`[gatherMessageContent] Added current message text: "${cleanedText}"`);
   }
   
   let currentMessage = message;
@@ -605,13 +618,26 @@ export async function gatherMessageContent(
         // Don't break here - continue collecting text from the chain
       }
       
-      // FIXED: Always collect text content from the reply chain
+      // CRITICAL FIX: Handle all message types in the reply chain
+      let messageText = '';
+      
       if (isTextMessage(referencedMessage)) {
-        const text = extractTextContent(referencedMessage);
-        if (text.trim()) {
-          textParts.unshift(text); // Use unshift to maintain reverse chronological order (oldest first)
-          logger.debug(`[gatherMessageContent] Collected text from message ${referencedMessage.id}: "${text}"`);
+        // Direct text message
+        messageText = extractTextContent(referencedMessage);
+        logger.debug(`[gatherMessageContent] Found text message with content: "${messageText}"`);
+      } else if (isReplyMessage(referencedMessage)) {
+        // Reply message - extract the reply content
+        const nestedReplyContent = referencedMessage.content as Reply;
+        if (nestedReplyContent.contentType.sameAs(ContentTypeText) && typeof nestedReplyContent.content === 'string') {
+          messageText = nestedReplyContent.content;
+          logger.debug(`[gatherMessageContent] Found reply message with content: "${messageText}"`);
         }
+      }
+      
+      // Add text if we found any
+      if (messageText.trim()) {
+        textParts.unshift(messageText.trim()); // Add to beginning (chronological order)
+        logger.debug(`[gatherMessageContent] Collected text from message ${referencedMessage.id}: "${messageText}"`);
       }
 
       // If the referenced message is NOT a reply, we've reached the end of the chain
@@ -642,6 +668,7 @@ export async function gatherMessageContent(
   
   logger.info(`[gatherMessageContent] FINAL RESULT: hasImage=${!!image}, textLength=${finalDescription.length}, imageId=${image?.id || 'none'}`);
   logger.debug(`[gatherMessageContent] Full description: "${finalDescription}"`);
+  logger.debug(`[gatherMessageContent] Text parts collected: ${JSON.stringify(textParts)}`);
 
   return { image, fullDescription: finalDescription };
 }
