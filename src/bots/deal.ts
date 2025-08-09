@@ -265,24 +265,41 @@ async function handleContentMessage(
       logger.debug(`[${name}] Found image from message: ${image.id}`);
     }
     
-    // Check if the message is a standalone image with no text.
-    if (isImageMessage(message) && textContent.length === 0) {
+    // FIXED: Better validation logic
+    const hasImage = !!image;
+    const hasText = textContent.length > 0;
+    
+    // Check if the message is a standalone image with no text and no @deal tag
+    if (isImageMessage(message) && !hasText && initialDescription.length === 0) {
       logger.debug(`[${name}] Ignoring standalone untagged image message.`);
       return;
     }
 
-    const description = textContent;
-    
-    if (!description) {
+    // FIXED: Validate we have either meaningful text OR an image
+    if (!hasText && !hasImage) {
       await sendErrorResponse(
         conversation, 
         message,
-        "Please include a description for your deal.",
+        "Please include a description or image for your deal.",
         name,
         false
       );
       return;
     }
+
+    // FIXED: If we only have very short text and no image, reject
+    if (!hasImage && textContent.trim().length < 3) {
+      await sendErrorResponse(
+        conversation, 
+        message,
+        "Please provide a more detailed description for your deal.",
+        name,
+        false
+      );
+      return;
+    }
+
+    const description = textContent || "Item from image"; // Fallback if only image
 
     logger.info(`[${name}] Processing deal content: hasImage=${!!image}, descriptionLength=${description.length}`);
 

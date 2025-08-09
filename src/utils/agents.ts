@@ -558,7 +558,7 @@ export async function gatherMessageContent(
   // Add the current message's text, cleaned of the @deal tag.
   const cleanedText = description.replace('@deal', '').trim();
   if (cleanedText) {
-    textParts.unshift(cleanedText);
+    textParts.push(cleanedText); // Changed from unshift to push to maintain chronological order
   }
   
   let currentMessage = message;
@@ -570,8 +570,8 @@ export async function gatherMessageContent(
     logger.debug(`[gatherMessageContent] Current message is an image: ${currentMessage.id}`);
   }
 
-  // Loop backward through the reply chain until an image or a non-reply message is found.
-  while (isReplyMessage(currentMessage) && !image) {
+  // FIXED: Collect ALL text from the reply chain, don't stop when image is found
+  while (isReplyMessage(currentMessage)) {
     const replyContent = currentMessage.content as Reply;
     const referencedMessageId = replyContent.reference;
 
@@ -598,19 +598,19 @@ export async function gatherMessageContent(
       logger.debug(`[gatherMessageContent] Found referenced message: ${referencedMessage.id}`);
       logger.debug(`[gatherMessageContent] Referenced message content type: ${referencedMessage.contentType?.typeId}`);
 
-      // Check for image FIRST before collecting text
-      if (isImageMessage(referencedMessage)) {
+      // FIXED: Collect image but don't break - continue collecting text
+      if (isImageMessage(referencedMessage) && !image) {
         image = referencedMessage;
         logger.info(`[gatherMessageContent] SUCCESS: Found image in reply chain: ${referencedMessage.id}`);
-        break; // Stop traversing once the image is found.
+        // Don't break here - continue collecting text from the chain
       }
       
-      // If it's a text message, collect its content.
+      // FIXED: Always collect text content from the reply chain
       if (isTextMessage(referencedMessage)) {
         const text = extractTextContent(referencedMessage);
         if (text.trim()) {
-          textParts.unshift(text);
-          logger.debug(`[gatherMessageContent] Collected text from message ${referencedMessage.id}. Current textParts: [${textParts.join(', ')}]`);
+          textParts.unshift(text); // Use unshift to maintain reverse chronological order (oldest first)
+          logger.debug(`[gatherMessageContent] Collected text from message ${referencedMessage.id}: "${text}"`);
         }
       }
 
@@ -630,9 +630,18 @@ export async function gatherMessageContent(
     }
   }
 
-  const fullDescription = textParts.join('\n\n');
-  logger.info(`[gatherMessageContent] FINAL RESULT: hasImage=${!!image}, textLength=${fullDescription.length}, imageId=${image?.id || 'none'}`);
-  logger.debug(`[gatherMessageContent] Full description: "${fullDescription}"`);
+  const fullDescription = textParts.join(' '); // FIXED: Use space separator instead of newlines for better context
+  
+  // FIXED: Add validation - if description is too short after cleaning, reject
+  const finalDescription = fullDescription.trim();
+  if (finalDescription.length < 3 && !image) {
+    logger.warn(`[gatherMessageContent] Description too short and no image: "${finalDescription}"`);
+    // Return empty to trigger validation failure
+    return { image, fullDescription: '' };
+  }
+  
+  logger.info(`[gatherMessageContent] FINAL RESULT: hasImage=${!!image}, textLength=${finalDescription.length}, imageId=${image?.id || 'none'}`);
+  logger.debug(`[gatherMessageContent] Full description: "${finalDescription}"`);
 
-  return { image, fullDescription };
+  return { image, fullDescription: finalDescription };
 }
