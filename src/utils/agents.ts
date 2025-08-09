@@ -28,7 +28,7 @@ const s3Client = new S3Client({
   region: process.env.AWS_REGION
 });
 
-// Shared types for deal agent
+// Conversation state tracking for deal agent including image cache and listing progress
 export type ConversationState = {
   address: string;
   image?: DecodedMessage<any>;
@@ -41,6 +41,7 @@ export type ConversationState = {
   lastActivity: number;
 };
 
+// Product listing data structure for deal creation
 export type ListingData = {
   title?: string;
   description?: string;
@@ -51,6 +52,7 @@ export type ListingData = {
   deliverable?: boolean;
 };
 
+// Image cache entry with timeout management
 export type ConversationImageCache = {
   image: DecodedMessage<RemoteAttachment | Attachment>;
   uploadedBy: string;
@@ -63,9 +65,7 @@ export const conversationImageCache = new Map<string, ConversationImageCache>();
 export const publishableListings = new Map<string, ListingData>();
 export const CACHE_TIMEOUT_MS = 60 * 1000;
 
-/**
- * Get message context including conversation, address, and DM status
- */
+// Get message context including conversation, address, and DM status
 export async function getMessageContext(worker: WorkerInstance, message: DecodedMessage) {
   try {
     const conversation = await worker.client.conversations.getConversationById(message.conversationId);
@@ -100,9 +100,7 @@ export async function getMessageContext(worker: WorkerInstance, message: Decoded
   }
 }
 
-/**
- * Validate user has a store on Hopscotch
- */
+// Validate user has a store on Hopscotch platform
 export async function validateUser(address: string) {
   try {
     logger.debug(`[agent-helpers] Validating user ${address}`);
@@ -130,9 +128,7 @@ export async function validateUser(address: string) {
   }
 }
 
-/**
- * Unified message processing logic for deal agent only
- */
+// Unified message processing logic for deal agent only
 export async function processMessage(
   message: DecodedMessage, 
   isDM: boolean, 
@@ -142,7 +138,7 @@ export async function processMessage(
   conversationStates?: Map<string, ConversationState>,
   publishableListings?: Map<string, ListingData>
 ): Promise<{ process: boolean; reason: string }> {
-  // For reactions, check if they're valid for our context (deal agent only)
+  // Handle reaction messages with validation for deal agent context
   if (isReactionMessage(message)) {
     const reaction = message.content as Reaction;
     
@@ -191,7 +187,7 @@ export async function processMessage(
     return { process: false, reason: "Deal agent only works in group chats" };
   }
 
-  // For groups, only process tagged messages with @deal
+  // Process tagged text messages with @deal in groups
   if (isTextMessage(message)) {
     const text = extractTextContent(message);
     const isTagged = isTaggedMessage(text, agentName);
@@ -203,7 +199,7 @@ export async function processMessage(
     }
   }
 
-  // For reply messages in groups
+  // Process reply messages in groups with tag validation
   if (isReplyMessage(message)) {
     const replyContent = message.content as Reply;
     const text = replyContent.content || '';
@@ -222,16 +218,15 @@ export async function processMessage(
     return { process: false, reason: "Ignoring untagged reply to non-bot message in group" };
   }
 
-    if (isImageMessage(message)) {
-        return { process: true, reason: "Processing image message in a group" };
-    }
+  // Process image messages in groups
+  if (isImageMessage(message)) {
+      return { process: true, reason: "Processing image message in a group" };
+  }
 
   return { process: false, reason: "Ignoring unsupported message type" };
 }
 
-/**
- * FIXED: Gather message chain by following reply references
- */
+// Gather message chain by following reply references
 export async function gatherMessageChain(
   conversation: any,
   message: DecodedMessage,
@@ -245,7 +240,7 @@ export async function gatherMessageChain(
     try {
       const replyContent = currentMessage.content as Reply;
       
-      // FIXED: Get conversation messages (this is an async method)
+      // Get conversation messages (this is an async method)
       const messages = await conversation.messages({ limit: 100 });
       const referencedMessage = messages.find((m: DecodedMessage) => m.id === replyContent.reference);
       
@@ -268,9 +263,7 @@ export async function gatherMessageChain(
   return chain;
 }
 
-/**
- * FIXED: Extract content from message chain for deal agent
- */
+// Extract content from message chain for deal agent
 export async function extractContentFromChain(
   messageChain: DecodedMessage[],
   worker: WorkerInstance,
@@ -306,9 +299,7 @@ export async function extractContentFromChain(
   return { image, textContent };
 }
 
-/**
- * FIXED: Check if a reply is directed to a bot message
- */
+// Check if a reply is directed to a bot message
 export async function isReplyToBotMessage(
   conversation: any, 
   referencedMessageId: string, 
@@ -316,7 +307,7 @@ export async function isReplyToBotMessage(
   botName: string
 ): Promise<boolean> {
   try {
-    // FIXED: Get conversation messages to find the referenced message
+    // Get conversation messages to find the referenced message
     const messages = await conversation.messages({ limit: 100 });
     const referencedMessage = messages.find((msg: any) => msg.id === referencedMessageId);
     
@@ -342,18 +333,18 @@ export async function isReplyToBotMessage(
   }
 }
 
-/**
- * Message type checkers
- */
+// Check if message is a reaction type
 export function isReactionMessage(message: DecodedMessage): boolean {
   return message.contentType?.sameAs(ContentTypeReaction) ?? false;
 }
 
+// Check if message contains an image attachment
 export function isImageMessage(message: DecodedMessage): boolean {
   return message.contentType?.sameAs(ContentTypeAttachment) || 
          message.contentType?.sameAs(ContentTypeRemoteAttachment) || false;
 }
 
+// Check if message is plain text type
 export function isTextMessage(message: DecodedMessage): boolean {
   if (!message.contentType) {
     return false;
@@ -361,13 +352,12 @@ export function isTextMessage(message: DecodedMessage): boolean {
   return message.contentType.typeId === 'text' || message.contentType.sameAs(ContentTypeText);
 }
 
+// Check if message is a reply to another message
 export function isReplyMessage(message: DecodedMessage): boolean {
   return message.contentType?.sameAs(ContentTypeReply) ?? false;
 }
 
-/**
- * Load attachment from message
- */
+// Load attachment from message handling both remote and direct attachments
 export async function loadAttachment(
   imageMessage: DecodedMessage<RemoteAttachment | Attachment>,
   client: any
@@ -394,9 +384,7 @@ export async function loadAttachment(
   }
 }
 
-/**
- * Add reaction to message
- */
+// Add emoji reaction to a specific message
 export async function addReaction(conversation: any, messageId: string, emoji: string): Promise<void> {
   try {
     const reaction: Reaction = {
@@ -413,9 +401,7 @@ export async function addReaction(conversation: any, messageId: string, emoji: s
   }
 }
 
-/**
- * Remove reaction from message
- */
+// Remove emoji reaction from a specific message
 export async function removeReaction(conversation: any, messageId: string, emoji: string): Promise<void> {
   try {
     const reaction: Reaction = {
@@ -432,9 +418,7 @@ export async function removeReaction(conversation: any, messageId: string, emoji
   }
 }
 
-/**
- * Upload file to S3
- */
+// Upload file to S3 with optional signed URL generation
 export async function uploadToS3(
   bucket: string,
   data: Uint8Array,
@@ -484,9 +468,7 @@ export async function uploadToS3(
   }
 }
 
-/**
- * Generate product URL for different environments
- */
+// Generate product URL for different environments
 export function getProductUrl(subjectId: number): string {
   const env = process.env.HS_ENV;
   const subdomain = env === 'test' ? 'test.' : env === 'dev' ? 'dev.' : '';
@@ -495,9 +477,7 @@ export function getProductUrl(subjectId: number): string {
   return url;
 }
 
-/**
- * IMPROVED: Extract text content from text or reply messages
- */
+// Extract text content from text or reply messages
 export function extractTextContent(message: DecodedMessage): string {
   if (!message.contentType) {
     logger.debug(`[extractTextContent] No content type for message ${message.id}`);
@@ -526,24 +506,18 @@ export function extractTextContent(message: DecodedMessage): string {
   }
 }
 
-/**
- * Check if text message is tagged with agent name
- */
+// Check if text message is tagged with agent name
 export function isTaggedMessage(text: string, agentName: string): boolean {
   return text.includes(`@${agentName}`);
 }
 
-/**
- * Extract description by removing agent tag
- */
+// Extract description by removing agent tag
 export function extractDescription(text: string, agentName: string): string {
   const isTagged = isTaggedMessage(text, agentName);
   return isTagged ? text.substring(`@${agentName}`.length).trim() : text.trim();
 }
 
-/**
- * Send error response and log to Influx
- */
+// Send error response and log to Influx
 export async function sendErrorResponse(
   conversation: any,
   message: DecodedMessage,
@@ -559,6 +533,7 @@ export async function sendErrorResponse(
   }
 }
 
+// Gather message content from reply chain with image and text collection
 export async function gatherMessageContent(
   conversation: any,
   message: DecodedMessage,
@@ -567,7 +542,7 @@ export async function gatherMessageContent(
   let image: DecodedMessage<any> | undefined;
   const textParts: string[] = [];
   
-  // Add the current message's text, cleaned of the @deal tag.
+  // Add the current message's text, cleaned of the @deal tag
   const cleanedText = description.replace('@deal', '').trim();
   if (cleanedText) {
     textParts.push(cleanedText); // Add current message text first
@@ -577,13 +552,13 @@ export async function gatherMessageContent(
   let currentMessage = message;
   const visitedMessageIds = new Set<string>();
 
-  // FIRST: Check if the current message itself is an image
+  // Check if the current message itself is an image
   if (isImageMessage(currentMessage)) {
     image = currentMessage;
     logger.debug(`[gatherMessageContent] Current message is an image: ${currentMessage.id}`);
   }
 
-  // FIXED: Collect ALL text from the reply chain, don't stop when image is found
+  // Collect ALL text from the reply chain, don't stop when image is found
   while (isReplyMessage(currentMessage)) {
     const replyContent = currentMessage.content as Reply;
     const referencedMessageId = replyContent.reference;
@@ -597,7 +572,7 @@ export async function gatherMessageContent(
     try {
       logger.debug(`[gatherMessageContent] Searching for message ${referencedMessageId}`);
       
-      // FIX: Use higher limit to ensure we get enough message history
+      // Use higher limit to ensure we get enough message history
       const messages = await conversation.messages({ limit: 500 });
       logger.debug(`[gatherMessageContent] Fetched ${messages.length} messages from conversation`);
       
@@ -611,14 +586,14 @@ export async function gatherMessageContent(
       logger.debug(`[gatherMessageContent] Found referenced message: ${referencedMessage.id}`);
       logger.debug(`[gatherMessageContent] Referenced message content type: ${referencedMessage.contentType?.typeId}`);
 
-      // FIXED: Collect image but don't break - continue collecting text
+      // Collect image but don't break - continue collecting text
       if (isImageMessage(referencedMessage) && !image) {
         image = referencedMessage;
         logger.info(`[gatherMessageContent] SUCCESS: Found image in reply chain: ${referencedMessage.id}`);
         // Don't break here - continue collecting text from the chain
       }
       
-      // CRITICAL FIX: Handle all message types in the reply chain
+      // Handle all message types in the reply chain
       let messageText = '';
       
       if (isTextMessage(referencedMessage)) {
@@ -656,9 +631,9 @@ export async function gatherMessageContent(
     }
   }
 
-  const fullDescription = textParts.join(' '); // FIXED: Use space separator instead of newlines for better context
+  const fullDescription = textParts.join(' '); // Use space separator instead of newlines for better context
   
-  // FIXED: Add validation - if description is too short after cleaning, reject
+  // Add validation - if description is too short after cleaning, reject
   const finalDescription = fullDescription.trim();
   if (finalDescription.length < 3 && !image) {
     logger.warn(`[gatherMessageContent] Description too short and no image: "${finalDescription}"`);
