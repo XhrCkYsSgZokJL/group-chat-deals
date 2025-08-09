@@ -1,59 +1,49 @@
+# --------------------
+# Ignored files
+# --------------------
+
+# GitHub and VCS
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-**/version.json
+# IDEs and Editors
 .prettierignore
-**/.vscode
+.prettierrc
+.vscode
+.vscode/*
 
-# dependencies
-**/node_modules
-**/.pnp
-.pnp.js
-**/.db3
-
-# testing
-/coverage
-
-# next.js
-**/.next/
-**/out/
-
-# production
-**/build/
-
-# misc
+# OS generated files
 .DS_Store
 *.pem
 
-# debug
+# Dependencies and Build Artifacts
+**/node_modules/
+**/.pnp
+.pnp.js
+**/.yarn/
+.yarnrc.yml
+**/dist/
+**/build/
+**/.next/
+**/out/
+.vercel
+**/.rollup.cache/
+*.tsbuildinfo
+next-env.d.ts
+
+# Cache and Logs
+**/rollup.cache/
+.data/
+.db3
+/coverage
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+xmtp-production-*
 
-# local env files
+# Local Environment Variables
 .env*.local
 
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-# dev
-.vscode/*
-.yarn/*
+# Other
 other/*
 packages/*
-providers/nextjs/node_modules/*
-providers/nextjs/.next/*
-.prettierrc
-.yarnrc.yml
-
-**/.yarn/
-.yarnclean
-**/.build/*
-**/dist/*
-**/.data/*
-**/.rollup.cache/*
-**/xmtp-dev-*

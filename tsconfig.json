@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+
+    "baseUrl": "src",
+
+    "esModuleInterop": true,
+
+    "forceConsistentCasingInFileNames": true,
+
+    "incremental": true,
+
+    "lib": ["ESNext"],
+
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+
+    "outDir": "dist",
+
+    "resolveJsonModule": true,
+    "rootDir": ".",
+
+    "skipLibCheck": true,
+    "strict": true,
+    "stripInternal": true,
+    "sourceMap": true,
+
+    "target": "ESNext"
+  },
+
+  "include": ["**/*.ts", "types/*.d.ts"],
+  "exclude": ["node_modules"]
+}
