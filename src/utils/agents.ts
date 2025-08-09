@@ -1,4 +1,4 @@
-// Updated agents utilities for deal agent - includes all necessary functions
+// Updated agents utilities for deal agent - FIXED message chain processing
 import { GetObjectCommand, PutObjectCommandInput, S3Client } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -222,16 +222,15 @@ export async function processMessage(
     return { process: false, reason: "Ignoring untagged reply to non-bot message in group" };
   }
 
-  // For image messages in groups, only process if tagged
-  if (isImageMessage(message)) {
-    return { process: false, reason: "Images must be tagged or part of reply chain in groups" };
-  }
+    if (isImageMessage(message)) {
+        return { process: true, reason: "Processing image message in a group" };
+    }
 
   return { process: false, reason: "Ignoring unsupported message type" };
 }
 
 /**
- * Gather message chain by following reply references
+ * FIXED: Gather message chain by following reply references
  */
 export async function gatherMessageChain(
   conversation: any,
@@ -245,12 +244,17 @@ export async function gatherMessageChain(
   while (isReplyMessage(currentMessage)) {
     try {
       const replyContent = currentMessage.content as Reply;
-      const referencedMessage = await conversation.messages.find((m: DecodedMessage) => m.id === replyContent.reference);
+      
+      // FIXED: Get conversation messages (this is an async method)
+      const messages = await conversation.messages({ limit: 100 });
+      const referencedMessage = messages.find((m: DecodedMessage) => m.id === replyContent.reference);
       
       if (referencedMessage) {
         chain.unshift(referencedMessage);
         currentMessage = referencedMessage;
+        logger.debug(`[agent-helpers] Found referenced message ${referencedMessage.id.substring(0, 8)} in reply chain`);
       } else {
+        logger.debug(`[agent-helpers] Referenced message ${replyContent.reference.substring(0, 8)} not found in recent messages`);
         break;
       }
     } catch (err) {
@@ -265,7 +269,7 @@ export async function gatherMessageChain(
 }
 
 /**
- * Extract content from message chain for deal agent
+ * FIXED: Extract content from message chain for deal agent
  */
 export async function extractContentFromChain(
   messageChain: DecodedMessage[],
@@ -303,7 +307,7 @@ export async function extractContentFromChain(
 }
 
 /**
- * Check if a reply is directed to a bot message
+ * FIXED: Check if a reply is directed to a bot message
  */
 export async function isReplyToBotMessage(
   conversation: any, 
@@ -312,12 +316,12 @@ export async function isReplyToBotMessage(
   botName: string
 ): Promise<boolean> {
   try {
-    // Get conversation messages to find the referenced message
-    const messages = await conversation.messages({ limit: 50 });
+    // FIXED: Get conversation messages to find the referenced message
+    const messages = await conversation.messages({ limit: 100 });
     const referencedMessage = messages.find((msg: any) => msg.id === referencedMessageId);
     
     if (!referencedMessage) {
-      logger.debug(`[${worker.name}] Referenced message ${referencedMessageId} not found in recent messages`);
+      logger.debug(`[${worker.name}] Referenced message ${referencedMessageId.substring(0, 8)} not found in recent messages`);
       return false;
     }
 
@@ -542,66 +546,93 @@ export async function sendErrorResponse(
   }
 }
 
-// Legacy function for backward compatibility with existing deal agent code
+// FIXED: Legacy function for backward compatibility with existing deal agent code
 export async function gatherMessageContent(
   conversation: any,
   message: DecodedMessage,
   description: string
 ): Promise<{ image: DecodedMessage<any> | undefined; fullDescription: string }> {
   let image: DecodedMessage<any> | undefined;
-  const textParts: string[] = [description];
+  const textParts: string[] = [];
   
-  // Check current message for image
-  if (isImageMessage(message)) {
-    image = message;
+  // Add the current message's text, cleaned of the @deal tag.
+  const cleanedText = description.replace('@deal', '').trim();
+  if (cleanedText) {
+    textParts.unshift(cleanedText);
   }
   
-  // If this is a reply, gather content from the reply chain
-  if (isReplyMessage(message)) {
+  let currentMessage = message;
+  const visitedMessageIds = new Set<string>();
+
+  // FIRST: Check if the current message itself is an image
+  if (isImageMessage(currentMessage)) {
+    image = currentMessage;
+    logger.debug(`[gatherMessageContent] Current message is an image: ${currentMessage.id}`);
+  }
+
+  // Loop backward through the reply chain until an image or a non-reply message is found.
+  while (isReplyMessage(currentMessage) && !image) {
+    const replyContent = currentMessage.content as Reply;
+    const referencedMessageId = replyContent.reference;
+
+    if (visitedMessageIds.has(referencedMessageId)) {
+      logger.warn(`[gatherMessageContent] Detected circular reply chain. Breaking loop.`);
+      break;
+    }
+    visitedMessageIds.add(referencedMessageId);
+
     try {
-      const replyContent = message.content as Reply;
-      let currentReference = replyContent.reference;
+      logger.debug(`[gatherMessageContent] Searching for message ${referencedMessageId}`);
       
-      // Follow the reply chain backwards to find images and collect text
-      const messages = await conversation.messages({ limit: 50 });
-      const visited = new Set<string>();
+      // FIX: Use higher limit to ensure we get enough message history
+      const messages = await conversation.messages({ limit: 500 });
+      logger.debug(`[gatherMessageContent] Fetched ${messages.length} messages from conversation`);
       
-      while (currentReference && !visited.has(currentReference)) {
-        visited.add(currentReference);
-        
-        const referencedMessage = messages.find((msg: DecodedMessage) => msg.id === currentReference);
-        if (!referencedMessage) break;
-        
-        // Check for image (prioritize most recent)
-        if (isImageMessage(referencedMessage) && !image) {
-          image = referencedMessage;
-          logger.debug(`Found image in reply chain: ${referencedMessage.id}`);
-        }
-        
-        // Collect text content
-        if (isTextMessage(referencedMessage)) {
-          const text = extractTextContent(referencedMessage);
-          if (text.trim() && !text.startsWith('@deal')) {
-            textParts.unshift(text);
-          }
-        }
-        
-        // Follow the chain if this message is also a reply
-        if (isReplyMessage(referencedMessage)) {
-          const chainReplyContent = referencedMessage.content as Reply;
-          currentReference = chainReplyContent.reference;
-        } else {
-          break;
+      const referencedMessage = messages.find((msg: DecodedMessage) => msg.id === referencedMessageId);
+      
+      if (!referencedMessage) {
+        logger.warn(`[gatherMessageContent] Referenced message ${referencedMessageId} not found in recent messages.`);
+        break;
+      }
+
+      logger.debug(`[gatherMessageContent] Found referenced message: ${referencedMessage.id}`);
+      logger.debug(`[gatherMessageContent] Referenced message content type: ${referencedMessage.contentType?.typeId}`);
+
+      // Check for image FIRST before collecting text
+      if (isImageMessage(referencedMessage)) {
+        image = referencedMessage;
+        logger.info(`[gatherMessageContent] SUCCESS: Found image in reply chain: ${referencedMessage.id}`);
+        break; // Stop traversing once the image is found.
+      }
+      
+      // If it's a text message, collect its content.
+      if (isTextMessage(referencedMessage)) {
+        const text = extractTextContent(referencedMessage);
+        if (text.trim()) {
+          textParts.unshift(text);
+          logger.debug(`[gatherMessageContent] Collected text from message ${referencedMessage.id}. Current textParts: [${textParts.join(', ')}]`);
         }
       }
+
+      // If the referenced message is NOT a reply, we've reached the end of the chain
+      if (!isReplyMessage(referencedMessage)) {
+        logger.debug(`[gatherMessageContent] Reached end of reply chain at message ${referencedMessage.id}`);
+        break;
+      }
+
+      // Continue traversing the reply chain
+      currentMessage = referencedMessage;
+
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      logger.warn(`Error gathering reply chain content: ${errorMsg}`);
+      logger.warn(`[gatherMessageContent] Error fetching referenced message ${referencedMessageId}: ${errorMsg}`);
+      break;
     }
   }
-  
+
   const fullDescription = textParts.join('\n\n');
-  logger.debug(`Gathered content: hasImage=${!!image}, textLength=${fullDescription.length}`);
-  
+  logger.info(`[gatherMessageContent] FINAL RESULT: hasImage=${!!image}, textLength=${fullDescription.length}, imageId=${image?.id || 'none'}`);
+  logger.debug(`[gatherMessageContent] Full description: "${fullDescription}"`);
+
   return { image, fullDescription };
 }

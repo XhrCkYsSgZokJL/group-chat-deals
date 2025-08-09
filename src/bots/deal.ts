@@ -1,4 +1,4 @@
-// deal.ts - Fixed deal agent handler with proper image support and complete utilities
+// deal.ts - Fixed deal agent handler with proper reply chain image handling
 import { getLogger } from '@hopscotch-trading/js-commons-core/utils';
 import { AppDB } from '@hopscotch-trading/js-commons-data';
 import { DecodedMessage } from '@xmtp/node-sdk';
@@ -18,12 +18,13 @@ import {
   isTextMessage,
   isImageMessage,
   processMessage,
-  gatherMessageChain,
-  extractContentFromChain
+  gatherMessageContent,
 } from '../utils/agents';
 import { generateProductImage, queryListings } from '../utils/chatGPT';
 import { ContentTypeReaction, Reaction } from '@xmtp/content-type-reaction';
 import { ContentTypeAttachment } from '@xmtp/content-type-remote-attachment';
+import { ContentTypeReply, Reply } from '@xmtp/content-type-reply';
+import { ContentTypeText } from '@xmtp/content-type-text';
 
 const name = 'deal';
 const logger = getLogger(name);
@@ -55,6 +56,7 @@ type ApprovalState = {
   listingData: ListingData;
   userInfo: any;
   state: DealState;
+  originalDealMessage?: DecodedMessage;
 };
 
 // Global storage for deal states
@@ -132,7 +134,6 @@ export default async function dealHandler(
     const errorMsg = err instanceof Error ? err.stack || err.message : String(err);
     const processingTime = Date.now() - startTime;
     logger.error(`[${name}] Error handling deal message ${message.id}: ${errorMsg} (took ${processingTime}ms)`);
-  
   }
 }
 
@@ -212,7 +213,7 @@ async function handleReaction(
       logger.info(`[${name}] Creator ${address} approved deal ${targetMessageId}`);
       
       // Publish immediately when creator approves (can be changed if you want to require other approvals)
-      await publishDeal(conversation, targetMessageId, approvalState, message);
+      await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
     } else {
       // Other user approval
       approvalState.otherApprovals.add(address);
@@ -220,7 +221,7 @@ async function handleReaction(
       
       // Check if we can publish (creator + at least one other)
       if (approvalState.creatorApproved && approvalState.otherApprovals.size >= 1) {
-        await publishDeal(conversation, targetMessageId, approvalState, message);
+        await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
       } else {
         logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size}`);
       }
@@ -240,16 +241,37 @@ async function handleContentMessage(
   let reactionSent = false;
   
   try {
-    // Gather content from message chain - this handles both text and images properly
-    const messageChain = await gatherMessageChain(conversation, message, worker);
-    const { image, textContent } = await extractContentFromChain(messageChain, worker, name);
-    
-    // Extract description, removing @deal tag
-    let description = textContent;
-    const dealIndex = description.indexOf('@deal');
-    if (dealIndex >= 0) {
-      description = description.substring(dealIndex + '@deal'.length).trim();
+    // Extract description, removing @deal tag first
+    let initialDescription = '';
+    if (isTextMessage(message)) {
+      initialDescription = extractTextContent(message);
+    } else if (isReplyMessage(message)) {
+      const replyContent = message.content as Reply;
+      initialDescription = typeof replyContent.content === 'string' ? replyContent.content : '';
     }
+    
+    const dealTagIndex = initialDescription.indexOf('@deal');
+    if (dealTagIndex >= 0) {
+      initialDescription = initialDescription.substring(dealTagIndex + '@deal'.length).trim();
+    }
+    
+    // Use the legacy function to gather content from reply chain
+    const { image, fullDescription } = await gatherMessageContent(conversation, message, initialDescription);
+    const textContent = fullDescription;
+    
+    // Additional debug logging
+    logger.debug(`[${name}] Content extraction result: hasImage=${!!image}, textLength=${textContent.length}`);
+    if (image) {
+      logger.debug(`[${name}] Found image from message: ${image.id}`);
+    }
+    
+    // Check if the message is a standalone image with no text.
+    if (isImageMessage(message) && textContent.length === 0) {
+      logger.debug(`[${name}] Ignoring standalone untagged image message.`);
+      return;
+    }
+
+    const description = textContent;
     
     if (!description) {
       await sendErrorResponse(
@@ -267,10 +289,10 @@ async function handleContentMessage(
     await addReaction(conversation, message.id, '💸');
     reactionSent = true;
 
-    // Create deal state
+    // Create deal state - FIXED: Ensure image from reply chain is captured
     const state: DealState = {
       address,
-      image,
+      image, // This should now properly contain the image from the reply chain
       textContent: description,
       lastActivity: Date.now()
     };
@@ -334,7 +356,7 @@ async function handleContentMessage(
     await removeReaction(conversation, message.id, '💸');
     reactionSent = false;
 
-    // Send the deal preview
+    // Send the deal preview as a reply to the original message
     const responseText = formatDealListing(listing);
     if (!responseText) {
       await sendErrorResponse(
@@ -347,7 +369,13 @@ async function handleContentMessage(
       return;
     }
 
-    const sentMessage = await conversation.send(responseText);
+    const replyContent = {
+      reference: message.id,
+      content: responseText,
+      contentType: ContentTypeText
+    };
+    
+    const sentMessage = await conversation.send(replyContent, ContentTypeReply);
 
     // Store for approval tracking
     const approvalState: ApprovalState = {
@@ -385,6 +413,9 @@ async function handleContentMessage(
     publishableDeals.set(messageId, approvalState);
     state.messageId = messageId;
 
+    // Store original deal message for replies
+    approvalState.originalDealMessage = message;
+
     logger.info(`[${name}] Stored approval state with message ID: ${messageId}`);
     logger.debug(`[${name}] Total deals stored: ${publishableDeals.size}`);
 
@@ -417,66 +448,67 @@ async function handleContentMessage(
 
 async function createListing(worker: WorkerInstance, state: DealState, userInfo: any): Promise<ListingData | null> {
   try {
-    // Determine image handling strategy - ensure we always have an image
-    let imageUrl = state.chatGptImageUrl;
+    let imageUrl: string | undefined = state.chatGptImageUrl;
     let generatedImage = false;
 
-    // Priority order:
-    // 1. Existing image from group chat
-    // 2. Previously uploaded ChatGPT image URL  
-    // 3. Generate new image from text description (required)
+    logger.debug(`[${name}] Creating listing - hasUserImage=${!!state.image}, hasChatGptUrl=${!!imageUrl}`);
 
+    // Priority 1: Use existing image from the conversation/reply chain
     if (state.image && !imageUrl) {
-      // Process existing user-uploaded image
+      logger.info(`[${name}] Using existing image from conversation for text: ${state.textContent.substring(0, 50)}...`);
+
       const attachment = await loadAttachment(state.image, worker.client);
       if (!attachment) {
-        logger.error(`[${name}] Failed to load attachment`);
+        logger.error(`[${name}] Failed to load attachment from existing image`);
         return null;
       }
 
-      // Upload to S3 for ChatGPT if not already done
       const chatGptUrl = await uploadToS3(
         process.env.AWS_BUCKET_CHATGPT ?? '',
         attachment.data,
         attachment.mimeType,
         true
       );
-      
+
       if (!chatGptUrl) {
-        logger.error(`[${name}] Failed to upload image to S3`);
+        logger.error(`[${name}] Failed to upload existing image to S3`);
         return null;
       }
       
       imageUrl = chatGptUrl;
       state.chatGptImageUrl = chatGptUrl;
-    } else if (!state.image && !imageUrl) {
-      // Generate image from text description - this is required
+      logger.info(`[${name}] Successfully processed existing image for ChatGPT API`);
+    }
+
+    // Priority 2: Generate new image from text description (only if no image exists)
+    if (!imageUrl) {
       if (!state.textContent.trim()) {
         logger.error(`[${name}] No text content available for image generation`);
         return null;
       }
 
-      logger.info(`[${name}] Generating required image for text: ${state.textContent.substring(0, 100)}...`);
-      
+      logger.info(`[${name}] No existing image found, generating new image for text: ${state.textContent.substring(0, 100)}...`);
+
       const generatedImageUrl = await generateProductImage(state.textContent);
       if (!generatedImageUrl) {
         logger.error(`[${name}] Failed to generate image`);
         return null;
       }
-      
+
       imageUrl = generatedImageUrl;
       generatedImage = true;
       state.chatGptImageUrl = imageUrl;
+      logger.info(`[${name}] Successfully generated new image`);
     }
 
-    // Validate we have a valid image URL
+    // Now, with a guaranteed imageUrl, the rest of the function can proceed
     if (!imageUrl || !imageUrl.startsWith('https://')) {
       logger.error(`[${name}] No valid image URL available: ${imageUrl}`);
       return null;
     }
 
     // Query listings API with guaranteed image
-    logger.debug(`[${name}] Querying listings API with text length: ${state.textContent.length}, image URL: ${imageUrl.substring(0, 50)}...`);
+    logger.debug(`[${name}] Querying listings API with text length: ${state.textContent.length}, image URL: ${imageUrl.substring(0, 50)}..., generated: ${generatedImage}`);
     
     const listing = await queryListings({
       text: state.textContent || "Please create a listing from the provided description.",
@@ -513,7 +545,9 @@ async function publishDeal(
   conversation: any,
   messageId: string,
   approvalState: ApprovalState,
-  originalMessage: DecodedMessage
+  originalMessage: DecodedMessage,
+  worker: WorkerInstance,
+  dealMessage: DecodedMessage
 ) {
   const startTime = Date.now();
   let buildingReactionSent = false;
@@ -557,7 +591,7 @@ async function publishDeal(
       
       if (approvalState.state.image) {
         // Upload existing image permanently
-        const attachment = await loadAttachment(approvalState.state.image, null);
+        const attachment = await loadAttachment(approvalState.state.image, worker.client);
         if (!attachment) {
           throw new Error('Failed to load attachment for permanent upload');
         }
@@ -630,8 +664,16 @@ async function publishDeal(
       const productUrl = getProductUrl(subject.subject.subjectId);
       await removeReaction(conversation, messageId, '🏗️');
       buildingReactionSent = false;
-      subject.subject.subjectId
-      await conversation.send(`Published deal #${subject.subject.subjectId} ${productUrl}`);
+      
+      // Reply to the original deal message
+      const publishMessage = `Published deal #${subject.subject.subjectId} ${productUrl}`;
+      const replyContent = {
+        reference: dealMessage.id,
+        content: publishMessage,
+        contentType: ContentTypeText
+      };
+      
+      await conversation.send(replyContent, ContentTypeReply);
       
       // Cleanup
       publishableDeals.delete(messageId);
