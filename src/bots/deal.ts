@@ -1,4 +1,4 @@
-// deal.ts - Fixed deal agent handler with proper reply chain image handling
+// Fixed deal agent handler with proper approval requirements
 import { getLogger } from '@hopscotch-trading/js-commons-core/utils';
 import { AppDB } from '@hopscotch-trading/js-commons-data';
 import { DecodedMessage } from '@xmtp/node-sdk';
@@ -29,7 +29,7 @@ import { ContentTypeText } from '@xmtp/content-type-text';
 const name = 'deal';
 const logger = getLogger(name);
 
-// Deal-specific types
+// State tracking for individual deals
 type DealState = {
   address: string;
   image?: DecodedMessage<any>;
@@ -40,6 +40,7 @@ type DealState = {
   lastActivity: number;
 };
 
+// Listing data structure for deal products
 type ListingData = {
   title?: string;
   description?: string;
@@ -50,6 +51,7 @@ type ListingData = {
   deliverable?: boolean;
 };
 
+// Approval state for deals requiring consensus
 type ApprovalState = {
   creatorApproved: boolean;
   otherApprovals: Set<string>;
@@ -63,6 +65,7 @@ type ApprovalState = {
 const dealStates = new Map<string, DealState>();
 const publishableDeals = new Map<string, ApprovalState>();
 
+// Main handler for processing deal agent messages
 export default async function dealHandler(
   worker: WorkerInstance,
   message: DecodedMessage,
@@ -137,7 +140,7 @@ export default async function dealHandler(
   }
 }
 
-// Helper function to convert ApprovalState map to ListingData map for processMessage
+// Convert ApprovalState map to ListingData map for processMessage
 function convertApprovalStateToListingData(approvalStates: Map<string, ApprovalState>): Map<string, ListingData> {
   const listingDataMap = new Map<string, ListingData>();
   for (const [key, approvalState] of approvalStates.entries()) {
@@ -146,6 +149,7 @@ function convertApprovalStateToListingData(approvalStates: Map<string, ApprovalS
   return listingDataMap;
 }
 
+// Handle reaction messages for approval/cancellation
 async function handleReaction(
   worker: WorkerInstance,
   conversation: any, 
@@ -212,23 +216,36 @@ async function handleReaction(
       approvalState.creatorApproved = true;
       logger.info(`[${name}] Creator ${address} approved deal ${targetMessageId}`);
       
-      // Publish immediately when creator approves (can be changed if you want to require other approvals)
-      await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
+      // Don't publish immediately when creator approves - wait for other approvals
+      logger.debug(`[${name}] Waiting for other approvals. Current other approvals: ${approvalState.otherApprovals.size}`);
+      
+      // Check if we can publish (creator + at least one other)
+      if (approvalState.otherApprovals.size >= 1) {
+        await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
+      } else {
+        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need at least 1)`);
+      }
     } else {
-      // Other user approval
+      // Other user approval - make sure they haven't already approved
+      if (approvalState.otherApprovals.has(address)) {
+        logger.debug(`[${name}] User ${address} has already approved deal ${targetMessageId}`);
+        return;
+      }
+      
       approvalState.otherApprovals.add(address);
-      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total approvals: ${approvalState.otherApprovals.size}`);
+      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total other approvals: ${approvalState.otherApprovals.size}`);
       
       // Check if we can publish (creator + at least one other)
       if (approvalState.creatorApproved && approvalState.otherApprovals.size >= 1) {
         await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
       } else {
-        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size}`);
+        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need creator + at least 1 other)`);
       }
     }
   }
 }
 
+// Handle content messages for creating new deals
 async function handleContentMessage(
   worker: WorkerInstance,
   conversation: any,
@@ -265,31 +282,48 @@ async function handleContentMessage(
       logger.debug(`[${name}] Found image from message: ${image.id}`);
     }
     
-    // Check if the message is a standalone image with no text.
-    if (isImageMessage(message) && textContent.length === 0) {
+    // Better validation logic
+    const hasImage = !!image;
+    const hasText = textContent.length > 0;
+    
+    // Check if the message is a standalone image with no text and no @deal tag
+    if (isImageMessage(message) && !hasText && initialDescription.length === 0) {
       logger.debug(`[${name}] Ignoring standalone untagged image message.`);
       return;
     }
 
-    const description = textContent;
-    
-    if (!description) {
+    // Validate we have either meaningful text OR an image
+    if (!hasText && !hasImage) {
       await sendErrorResponse(
         conversation, 
         message,
-        "Please include a description for your deal.",
+        "Please include a description or image for your deal.",
         name,
         false
       );
       return;
     }
 
+    // If we only have very short text and no image, reject
+    if (!hasImage && textContent.trim().length < 3) {
+      await sendErrorResponse(
+        conversation, 
+        message,
+        "Please provide a more detailed description for your deal.",
+        name,
+        false
+      );
+      return;
+    }
+
+    const description = textContent || "Item from image"; // Fallback if only image
+
     logger.info(`[${name}] Processing deal content: hasImage=${!!image}, descriptionLength=${description.length}`);
 
     await addReaction(conversation, message.id, '💸');
     reactionSent = true;
 
-    // Create deal state - FIXED: Ensure image from reply chain is captured
+    // Create deal state - ensure image from reply chain is captured
     const state: DealState = {
       address,
       image, // This should now properly contain the image from the reply chain
@@ -446,6 +480,7 @@ async function handleContentMessage(
   }
 }
 
+// Create listing data from deal state and user information
 async function createListing(worker: WorkerInstance, state: DealState, userInfo: any): Promise<ListingData | null> {
   try {
     let imageUrl: string | undefined = state.chatGptImageUrl;
@@ -519,7 +554,7 @@ async function createListing(worker: WorkerInstance, state: DealState, userInfo:
       throw new Error('Failed to query listings API');
     }
 
-    // CRITICAL FIX: Ensure required fields are populated with defaults
+    // Ensure required fields are populated with defaults
     const validatedListing: ListingData = {
       title: listing.title || 'Deal Item',
       description: listing.description || state.textContent,
@@ -541,6 +576,7 @@ async function createListing(worker: WorkerInstance, state: DealState, userInfo:
   }
 }
 
+// Publish approved deal to the database and notify users
 async function publishDeal(
   conversation: any,
   messageId: string,
@@ -720,6 +756,7 @@ async function publishDeal(
   }
 }
 
+// Validate listing data has all required fields
 function isValidListing(listing: ListingData): boolean {
   const isValid = !!(listing.title && listing.description && listing.priceValue && 
            listing.priceAsset && listing.inventory != null && 
@@ -732,6 +769,7 @@ function isValidListing(listing: ListingData): boolean {
   return isValid;
 }
 
+// Format listing data into human-readable deal preview
 function formatDealListing(listing: ListingData): string | null {
   if (!isValidListing(listing)) {
     logger.error(`[${name}] Cannot format invalid listing: title="${listing.title}", description="${listing.description?.substring(0, 50)}...", priceValue="${listing.priceValue}", priceAsset="${listing.priceAsset}", inventory=${listing.inventory}, deliverable=${listing.deliverable}, pickupZip="${listing.pickupZip}"`);
