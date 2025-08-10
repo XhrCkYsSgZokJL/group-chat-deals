@@ -1,4 +1,4 @@
-# P2D Bot (Prompt-2-Deal) 🔥
+# DealFlow 🔥
 
 **Upgrade your group chat into an economy.**
 
@@ -96,7 +96,7 @@ User Balance Check → Reward Decision
 - **Tokens:** ETH, USDC
 - **Future:** Mainnet Base integration planned
 
-## 🌟 Why P2D Bot?
+## 🌟 Why DealFlow?
 
 **For Communities:**
 - Transform passive group chats into active marketplaces
@@ -117,6 +117,6 @@ User Balance Check → Reward Decision
 
 **Ready to monetize your community?**
 
-P2D Bot - Where conversation meets commerce, and participation pays.
+DealFlow - Where conversation meets commerce, and participation pays.
 
 *Built on Base • Powered by AI • Rewarded with Crypto*
