@@ -1,5 +1,5 @@
 // Fixed deal agent handler with proper approval requirements
-import { getLogger } from '@hopscotch-trading/js-commons-core/utils';
+import { getLogger, sleep } from '@hopscotch-trading/js-commons-core/utils';
 import { AppDB } from '@hopscotch-trading/js-commons-data';
 import { DecodedMessage } from '@xmtp/node-sdk';
 import { WorkerInstance } from 'workers';
@@ -211,13 +211,18 @@ async function handleReaction(
   if (normalizedContent === '👍') {
     const isCreator = address === approvalState.state.address;
     
+    // Check if this is the very first thumbs up
+    const isFirstThumbsUp = approvalState.otherApprovals.size === 0;
+    
     if (isCreator) {
       // Creator approval
+      if (approvalState.creatorApproved) {
+        logger.debug(`[${name}] Creator ${address} has already approved deal ${targetMessageId}`);
+        return;
+      }
+      
       approvalState.creatorApproved = true;
       logger.info(`[${name}] Creator ${address} approved deal ${targetMessageId}`);
-      
-      // Don't publish immediately when creator approves - wait for other approvals
-      logger.debug(`[${name}] Waiting for other approvals. Current other approvals: ${approvalState.otherApprovals.size}`);
       
       // Check if we can publish (creator + at least one other)
       if (approvalState.otherApprovals.size >= 1) {
@@ -235,6 +240,20 @@ async function handleReaction(
       approvalState.otherApprovals.add(address);
       logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total other approvals: ${approvalState.otherApprovals.size}`);
       
+      // Reward if this is the very first thumbs up (testing mode)
+      if (isFirstThumbsUp) {
+        try {
+          await sendUSDCReward(address, targetMessageId);
+          logger.info(`[${name}] Sent 0.01 USDC reward to first thumbs up (non-creator) ${address} for deal ${targetMessageId}`);
+          
+          // Send confirmation message to chat
+          await sendRewardConfirmation(conversation, address);
+        } catch (rewardError) {
+          const errorMsg = rewardError instanceof Error ? rewardError.message : String(rewardError);
+          logger.error(`[${name}] Failed to send USDC reward to ${address}: ${errorMsg}`);
+        }
+      }
+      
       // Check if we can publish (creator + at least one other)
       if (approvalState.creatorApproved && approvalState.otherApprovals.size >= 1) {
         await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
@@ -242,6 +261,54 @@ async function handleReaction(
         logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need creator + at least 1 other)`);
       }
     }
+  }
+}
+
+// Send USDC reward to the first approver
+async function sendUSDCReward(recipientAddress: string, dealId: string): Promise<void> {  
+  try {
+    logger.debug(`[${name}] Sending USDC reward to ${recipientAddress} for deal ${dealId}`);
+    
+    const response = await fetch(`${process.env.REWARD_SERVER_URL}/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        to: recipientAddress,
+        amount: process.env.REWARD_AMOUNT
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Server responded with ${response.status}: ${errorText}`);
+    }
+
+    const result = await response.json();
+    logger.info(`[${name}] USDC reward transaction submitted: ${JSON.stringify(result)}`);
+    
+    return;
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error(`[${name}] Failed to send USDC reward: ${errorMsg}`);
+    throw error;
+  }
+}
+
+// Send reward confirmation message to chat
+async function sendRewardConfirmation(conversation: any, recipientAddress: string): Promise<void> {
+  try {
+    // Truncate address for display (show first 6 and last 4 characters)
+    const displayAddress = `${recipientAddress.slice(0, 6)}...${recipientAddress.slice(-4)}`;
+    const confirmationMessage = `💰 0.01 USDC sent to ${displayAddress}. Thank you for testing with Hopscotch!`;
+    
+    await conversation.send(confirmationMessage, ContentTypeText);
+    logger.info(`[${name}] Sent reward confirmation message for ${recipientAddress}`);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    logger.error(`[${name}] Failed to send reward confirmation message: ${errorMsg}`);
+    // Don't throw - this is just a nice-to-have notification
   }
 }
 
@@ -409,6 +476,7 @@ async function handleContentMessage(
       contentType: ContentTypeText
     };
     
+    await sleep(1000);// xmtp timing issues
     const sentMessage = await conversation.send(replyContent, ContentTypeReply);
 
     // Store for approval tracking
