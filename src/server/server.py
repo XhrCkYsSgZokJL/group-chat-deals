@@ -299,7 +299,7 @@ async def send_reward_route(request: Request):
                 "status": "completed",
                 "transaction_hash": tx_hash,
                 "reward_type": "ETH",
-                "amount": f"{ETH_REWARD_AMOUNT} ETH",
+                "amount": f"{ETH_REWARD_AMOUNT}",
                 "reason": "new_user"
             })
         else:
@@ -312,7 +312,7 @@ async def send_reward_route(request: Request):
                 "status": "completed",
                 "transaction_hash": tx_hash,
                 "reward_type": "USDC",
-                "amount": f"{USDC_REWARD_AMOUNT} USDC",
+                "amount": f"{USDC_REWARD_AMOUNT}",
                 "reason": "existing_user"
             })
 

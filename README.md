@@ -6,6 +6,18 @@ Turn any Base group chat into a marketplace with built-in rewards. Tag @deal wit
 
 ## 🚀 How It Works
 
+Bob: “Just found these in my closet” [uploads photo of Air Jordans]
+Alice: “Yo those are clean! What size?”
+Bob: “@deal Air Jordans, size 11, stock condition”
+
+1. XMTP Message Router
+2. Context Engine
+3. AI Listing Generator
+4. Social Approval System
+5. Crypto Rewards Engine
+
+## 💰 Major Features
+
 **Create Listings:**
 1. **Tag & Describe:** @deal Vintage sneakers, size 10, great condition
 2. **AI Processing:** Bot generates listing with image, title, pricing
