@@ -243,14 +243,19 @@ async function handleReaction(
       // Reward if this is the very first thumbs up (testing mode)
       if (isFirstThumbsUp) {
         try {
-          await sendUSDCReward(address, targetMessageId);
-          logger.info(`[${name}] Sent 0.01 USDC reward to first thumbs up (non-creator) ${address} for deal ${targetMessageId}`);
+          const rewardResult = await sendUSDCReward(address, targetMessageId);
+          logger.info(`[${name}] Sent reward to first thumbs up (non-creator) ${address} for deal ${targetMessageId}: ${JSON.stringify(rewardResult)}`);
           
-          // Send confirmation message to chat
-          await sendRewardConfirmation(conversation, address);
+          // Send confirmation message to chat with reward details
+          if (rewardResult && rewardResult.reward_type && rewardResult.amount) {
+            await sendRewardConfirmation(conversation, address, rewardResult.reward_type, rewardResult.amount);
+          } else {
+            // Fallback confirmation if response format is unexpected
+            await sendRewardConfirmation(conversation, address, "reward", "sent");
+          }
         } catch (rewardError) {
           const errorMsg = rewardError instanceof Error ? rewardError.message : String(rewardError);
-          logger.error(`[${name}] Failed to send USDC reward to ${address}: ${errorMsg}`);
+          logger.error(`[${name}] Failed to send reward to ${address}: ${errorMsg}`);
         }
       }
       
@@ -264,10 +269,10 @@ async function handleReaction(
   }
 }
 
-// Send USDC reward to the first approver
-async function sendUSDCReward(recipientAddress: string, dealId: string): Promise<void> {  
+// Send reward to the first approver
+async function sendUSDCReward(recipientAddress: string, dealId: string): Promise<any> {  
   try {
-    logger.debug(`[${name}] Sending USDC reward to ${recipientAddress} for deal ${dealId}`);
+    logger.debug(`[${name}] Sending reward to ${recipientAddress} for deal ${dealId}`);
     
     const response = await fetch(`${process.env.REWARD_SERVER_URL}/send`, {
       method: 'POST',
@@ -275,8 +280,8 @@ async function sendUSDCReward(recipientAddress: string, dealId: string): Promise
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        to: recipientAddress,
-        amount: process.env.REWARD_AMOUNT
+        to: recipientAddress
+        // Removed amount parameter - server will decide based on balance
       })
     });
 
@@ -286,22 +291,22 @@ async function sendUSDCReward(recipientAddress: string, dealId: string): Promise
     }
 
     const result = await response.json();
-    logger.info(`[${name}] USDC reward transaction submitted: ${JSON.stringify(result)}`);
+    logger.info(`[${name}] Reward transaction submitted: ${JSON.stringify(result)}`);
     
-    return;
+    return result;
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    logger.error(`[${name}] Failed to send USDC reward: ${errorMsg}`);
+    logger.error(`[${name}] Failed to send reward: ${errorMsg}`);
     throw error;
   }
 }
 
 // Send reward confirmation message to chat
-async function sendRewardConfirmation(conversation: any, recipientAddress: string): Promise<void> {
+async function sendRewardConfirmation(conversation: any, recipientAddress: string, rewardType: string = "reward", amount: string = "sent"): Promise<void> {
   try {
     // Truncate address for display (show first 6 and last 4 characters)
     const displayAddress = `${recipientAddress.slice(0, 6)}...${recipientAddress.slice(-4)}`;
-    const confirmationMessage = `💰 0.01 USDC sent to ${displayAddress}. Thank you for testing with Hopscotch!`;
+    const confirmationMessage = `💰 ${amount} ${rewardType} sent to ${displayAddress}. Thank you for testing with Hopscotch!`;
     
     await conversation.send(confirmationMessage, ContentTypeText);
     logger.info(`[${name}] Sent reward confirmation message for ${recipientAddress}`);
