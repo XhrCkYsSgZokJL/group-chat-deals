@@ -29,6 +29,9 @@ import { ContentTypeText } from '@xmtp/content-type-text';
 const name = 'deal';
 const logger = getLogger(name);
 
+// Check if testing mode is enabled
+const TESTING_MODE = process.env.TESTING_MODE === 'true';
+
 // State tracking for individual deals
 type DealState = {
   address: string;
@@ -59,11 +62,15 @@ type ApprovalState = {
   userInfo: any;
   state: DealState;
   originalDealMessage?: DecodedMessage;
+  firstApprover?: string; // Track who gave the first approval
 };
 
 // Global storage for deal states
 const dealStates = new Map<string, DealState>();
 const publishableDeals = new Map<string, ApprovalState>();
+
+// Log testing mode status on startup
+logger.info(`[${name}] Deal handler initialized - Testing mode: ${TESTING_MODE ? 'ENABLED' : 'DISABLED'}`);
 
 // Main handler for processing deal agent messages
 export default async function dealHandler(
@@ -149,6 +156,18 @@ function convertApprovalStateToListingData(approvalStates: Map<string, ApprovalS
   return listingDataMap;
 }
 
+// Check if deal is ready to publish based on current mode
+function isReadyToPublish(approvalState: ApprovalState): boolean {
+  if (TESTING_MODE) {
+    // In testing mode: just need 1 thumbs up from anyone
+    const totalApprovals = (approvalState.creatorApproved ? 1 : 0) + approvalState.otherApprovals.size;
+    return totalApprovals >= 1;
+  } else {
+    // Normal mode: need creator + at least 1 other
+    return approvalState.creatorApproved && approvalState.otherApprovals.size >= 1;
+  }
+}
+
 // Handle reaction messages for approval/cancellation
 async function handleReaction(
   worker: WorkerInstance,
@@ -190,7 +209,7 @@ async function handleReaction(
     return;
   }
 
-  logger.debug(`[${name}] Found approval state for message ${targetMessageId}, creator: ${approvalState.state.address}`);
+  logger.debug(`[${name}] Found approval state for message ${targetMessageId}, creator: ${approvalState.state.address}, testing mode: ${TESTING_MODE}`);
 
   // Handle thumbs down - cancel deal
   if (normalizedContent === '👎') {
@@ -211,8 +230,8 @@ async function handleReaction(
   if (normalizedContent === '👍') {
     const isCreator = address === approvalState.state.address;
     
-    // Check if this is the very first thumbs up
-    const isFirstThumbsUp = approvalState.otherApprovals.size === 0;
+    // Check if this is the very first thumbs up overall
+    const isFirstThumbsUp = approvalState.otherApprovals.size === 0 && !approvalState.creatorApproved;
     
     if (isCreator) {
       // Creator approval
@@ -222,14 +241,11 @@ async function handleReaction(
       }
       
       approvalState.creatorApproved = true;
+      if (isFirstThumbsUp) {
+        approvalState.firstApprover = address;
+      }
       logger.info(`[${name}] Creator ${address} approved deal ${targetMessageId}`);
       
-      // Check if we can publish (creator + at least one other)
-      if (approvalState.otherApprovals.size >= 1) {
-        await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
-      } else {
-        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need at least 1)`);
-      }
     } else {
       // Other user approval - make sure they haven't already approved
       if (approvalState.otherApprovals.has(address)) {
@@ -238,32 +254,43 @@ async function handleReaction(
       }
       
       approvalState.otherApprovals.add(address);
-      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total other approvals: ${approvalState.otherApprovals.size}`);
-      
-      // Reward if this is the very first thumbs up (testing mode)
       if (isFirstThumbsUp) {
-        try {
-          const rewardResult = await sendUSDCReward(address, targetMessageId);
-          logger.info(`[${name}] Sent reward to first thumbs up (non-creator) ${address} for deal ${targetMessageId}: ${JSON.stringify(rewardResult)}`);
-          
-          // Send confirmation message to chat with reward details
-          if (rewardResult && rewardResult.reward_type && rewardResult.amount) {
-            await sendRewardConfirmation(conversation, address, rewardResult.reward_type, rewardResult.amount);
-          } else {
-            // Fallback confirmation if response format is unexpected
-            await sendRewardConfirmation(conversation, address, "reward", "sent");
-          }
-        } catch (rewardError) {
-          const errorMsg = rewardError instanceof Error ? rewardError.message : String(rewardError);
-          logger.error(`[${name}] Failed to send reward to ${address}: ${errorMsg}`);
-        }
+        approvalState.firstApprover = address;
       }
+      logger.info(`[${name}] User ${address} approved deal ${targetMessageId}. Total other approvals: ${approvalState.otherApprovals.size}`);
+    }
+
+    // Send reward to first approver (in both modes)
+    if (isFirstThumbsUp) {
+      try {
+        const rewardResult = await sendUSDCReward(address, targetMessageId);
+        logger.info(`[${name}] Sent reward to first approver ${address} for deal ${targetMessageId}: ${JSON.stringify(rewardResult)}`);
+        
+        // Send confirmation message to chat with reward details
+        if (rewardResult && rewardResult.reward_type && rewardResult.amount) {
+          await sendRewardConfirmation(conversation, address, rewardResult.reward_type, rewardResult.amount);
+        } else {
+          // Fallback confirmation if response format is unexpected
+          await sendRewardConfirmation(conversation, address, "reward", "sent");
+        }
+      } catch (rewardError) {
+        const errorMsg = rewardError instanceof Error ? rewardError.message : String(rewardError);
+        logger.error(`[${name}] Failed to send reward to ${address}: ${errorMsg}`);
+      }
+    }
+
+    // Check if we can publish based on current mode
+    if (isReadyToPublish(approvalState)) {
+      const mode = TESTING_MODE ? 'testing' : 'normal';
+      const totalApprovals = (approvalState.creatorApproved ? 1 : 0) + approvalState.otherApprovals.size;
+      logger.info(`[${name}] Deal ready to publish in ${mode} mode - total approvals: ${totalApprovals}`);
       
-      // Check if we can publish (creator + at least one other)
-      if (approvalState.creatorApproved && approvalState.otherApprovals.size >= 1) {
-        await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
+      await publishDeal(conversation, targetMessageId, approvalState, message, worker, approvalState.originalDealMessage || message);
+    } else {
+      if (TESTING_MODE) {
+        logger.debug(`[${name}] Deal not ready (testing mode): total approvals needed=1, current=${(approvalState.creatorApproved ? 1 : 0) + approvalState.otherApprovals.size}`);
       } else {
-        logger.debug(`[${name}] Deal not ready to publish: creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need creator + at least 1 other)`);
+        logger.debug(`[${name}] Deal not ready (normal mode): creatorApproved=${approvalState.creatorApproved}, otherApprovals=${approvalState.otherApprovals.size} (need creator + at least 1 other)`);
       }
     }
   }
@@ -849,7 +876,10 @@ function formatDealListing(listing: ListingData): string | null {
     return null;
   }
 
-  const actionText = "👍 from creator +1 other to publish.";
+  // Different action text based on testing mode
+  const actionText = TESTING_MODE 
+    ? "👍 from anyone to publish." 
+    : "👍 from creator +1 other to publish.";
 
   const formatted = `${listing.title}
 
@@ -859,6 +889,6 @@ ${listing.inventory} available for ${listing.priceValue} ${listing.priceAsset}
 
 ${actionText}`;
 
-  logger.debug(`[${name}] Formatted deal listing: ${listing.title} - ${listing.priceValue} ${listing.priceAsset}`);
+  logger.debug(`[${name}] Formatted deal listing: ${listing.title} - ${listing.priceValue} ${listing.priceAsset} (${TESTING_MODE ? 'testing' : 'normal'} mode)`);
   return formatted;
 }
