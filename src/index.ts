@@ -1,7 +1,7 @@
 import type { XmtpEnv } from "@xmtp/node-sdk";
-import { initializeAssistant, initializeOpenAi } from "utils/chatGPT";
+import { initializeOpenAi } from "utils/chatGPT";
 import { createXmtpWorkers, type WorkerConfig } from "./workers";
-import dealHandler from "bots/deal";
+import hopscotchHandler from "bots/hopscotch";
 import { injectSecrets } from './utils/secrets';
 import { getLogger } from "@hopscotch-trading/js-commons-core/utils";
 import { generateEncryptionKeyHex } from "utils/xmtp";
@@ -59,10 +59,7 @@ async function main(): Promise<void> {
     }
 
     // Initialize ai components
-    await Promise.all([
-      initializeOpenAi(),
-      initializeAssistant('deal')
-    ]);
+    initializeOpenAi();
 
     // Create and start xmtp workers
     const xmtpEnv: XmtpEnv = 'production';
@@ -74,7 +71,7 @@ async function main(): Promise<void> {
     }];
     
     workers = await createXmtpWorkers(workerConfigs);
-    await workers.startMessageStream("deal", dealHandler);
+    await workers.startMessageStream("deal", hopscotchHandler);
     
     logger.info('Application initialized and listening for messages');
 

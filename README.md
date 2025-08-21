@@ -2,13 +2,13 @@
 
 **Upgrade your group chat into an economy.**
 
-Turn any Base group chat into a marketplace with built-in rewards. Tag @deal with a description to instantly create product listings, and earn crypto for community participation. Built for Hopscotch.trade Store owners.
+Turn any Base group chat into a marketplace with built-in rewards. Tag @hopscotch with a description to instantly create product listings, and earn crypto for community participation. Built for Hopscotch.trade Store owners.
 
 ## 🚀 How It Works
 
 Bob: “Just found these in my closet” [uploads photo of Air Jordans]
 Alice: “Yo those are clean! What size?”
-Bob: “@deal Air Jordans, size 11, stock condition”
+Bob: "@hopscotch Air Jordans, size 11, stock condition"
 
 1. XMTP Message Router
 2. Context Engine
@@ -19,7 +19,7 @@ Bob: “@deal Air Jordans, size 11, stock condition”
 ## 💰 Major Features
 
 **Create Listings:**
-1. **Tag & Describe:** @deal Vintage sneakers, size 10, great condition
+1. **Tag & Describe:** @hopscotch Vintage sneakers, size 10, great condition
 2. **AI Processing:** Bot generates listing with image, title, pricing
 3. **Social Approval:** Creator + 1 other person approve with 👍
 4. **Instant Publishing:** Live on Hopscotch.trade marketplace
@@ -69,10 +69,10 @@ Bob: “@deal Air Jordans, size 11, stock condition”
    - Group chat (not available in DMs)
 
 2. **Add the Bot:**
-   - Add `deal.hopscotch.eth` to your Base group chat
+   - Add `xmtp.hopscotch.eth` to your Base group chat
 
 3. **Start Creating & Earning:**
-   - Tag @deal with product descriptions
+   - Tag @hopscotch with product descriptions
    - Approve deals with 👍 to earn rewards
    - Watch your marketplace grow
 

@@ -1,10 +1,5 @@
-// Updated agents utilities for deal agent - FIXED message chain processing
-import { GetObjectCommand, PutObjectCommandInput, S3Client } from "@aws-sdk/client-s3";
-import { Upload } from "@aws-sdk/lib-storage";
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { getHopscotchEnv } from '@hopscotch-trading/js-commons-core/lang';
-import { InSeconds, getLogger, sleep } from '@hopscotch-trading/js-commons-core/utils';
-import { AppDB } from '@hopscotch-trading/js-commons-data';
+// XMTP-specific utilities for messaging platform integration
+import { getLogger } from '@hopscotch-trading/js-commons-core/utils';
 import {
     ContentTypeReaction,
     Reaction,
@@ -19,14 +14,11 @@ import {
 import { ContentTypeReply, Reply } from '@xmtp/content-type-reply';
 import { ContentTypeText } from '@xmtp/content-type-text';
 import { DecodedMessage } from '@xmtp/node-sdk';
-import { v4 } from 'uuid';
 import { WorkerInstance } from 'workers';
+import { ListingData, isTaggedMessage, cleanTagFromText } from './agnostic';
+import { botTags } from './constants';
 
-const logger = getLogger('agent-helpers');
-
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION
-});
+const logger = getLogger('xmtp-agents');
 
 // Conversation state tracking for deal agent including image cache and listing progress
 export type ConversationState = {
@@ -41,16 +33,6 @@ export type ConversationState = {
   lastActivity: number;
 };
 
-// Product listing data structure for deal creation
-export type ListingData = {
-  title?: string;
-  description?: string;
-  priceValue?: string;
-  priceAsset?: string;
-  inventory?: number;
-  pickupZip?: string;
-  deliverable?: boolean;
-};
 
 // Image cache entry with timeout management
 export type ConversationImageCache = {
@@ -62,7 +44,6 @@ export type ConversationImageCache = {
 
 // Global cache and storage for deal agent
 export const conversationImageCache = new Map<string, ConversationImageCache>();
-export const publishableListings = new Map<string, ListingData>();
 export const CACHE_TIMEOUT_MS = 60 * 1000;
 
 // Get message context including conversation, address, and DM status
@@ -100,33 +81,6 @@ export async function getMessageContext(worker: WorkerInstance, message: Decoded
   }
 }
 
-// Validate user has a store on Hopscotch platform
-export async function validateUser(address: string) {
-  try {
-    logger.debug(`[agent-helpers] Validating user ${address}`);
-    
-    address = "0xF69c8B1261b38352eAd7B91421dA38F5fd261EC9"; // REMOVE FOR ACTUAL PRODUCTION
-
-    const user = await AppDB.getUserByWallet(address);
-    if (!user) {
-      logger.debug(`[agent-helpers] No user found for address ${address}`);
-      return null;
-    }
-
-    const merchant = await AppDB.getMerchantByUserId(user.did as string);
-    if (!merchant) {
-      logger.debug(`[agent-helpers] No merchant found for user ${user.did}`);
-      return null;
-    }
-
-    logger.debug(`[agent-helpers] User ${address} validated with merchant ${merchant.merchantId}`);
-    return { user, merchant };
-  } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    logger.error(`[agent-helpers] Error validating user ${address}: ${errorMsg}`);
-    return null;
-  }
-}
 
 // Unified message processing logic for deal agent only
 export async function processMessage(
@@ -187,10 +141,10 @@ export async function processMessage(
     return { process: false, reason: "Deal agent only works in group chats" };
   }
 
-  // Process tagged text messages with @deal in groups
+  // Process tagged text messages with bot tags in groups
   if (isTextMessage(message)) {
     const text = extractTextContent(message);
-    const isTagged = isTaggedMessage(text, agentName);
+    const isTagged = isTaggedMessage(text, botTags);
     
     if (isTagged) {
       return { process: true, reason: "Processing tagged group text message" };
@@ -202,15 +156,30 @@ export async function processMessage(
   // Process reply messages in groups with tag validation
   if (isReplyMessage(message)) {
     const replyContent = message.content as Reply;
-    const text = replyContent.content || '';
-    const isTagged = typeof text === 'string' && isTaggedMessage(text, agentName);
+    
+    // Extract text content properly from reply message
+    let text = '';
+    if (replyContent.contentType.sameAs(ContentTypeText) && typeof replyContent.content === 'string') {
+      text = replyContent.content;
+    } else if (replyContent.contentType.sameAs(ContentTypeReply)) {
+      // Handle nested reply case
+      const nestedReply = replyContent.content as Reply;
+      if (nestedReply.contentType.sameAs(ContentTypeText) && typeof nestedReply.content === 'string') {
+        text = nestedReply.content;
+      }
+    } else {
+      // Fallback to extractTextContent
+      text = extractTextContent(message);
+    }
+    
+    const isTagged = text.length > 0 && isTaggedMessage(text, botTags);
     
     if (isTagged) {
       return { process: true, reason: "Processing tagged group reply message" };
     }
     
     // Check if this is a reply to a bot message
-    const isReplyToBot = await isReplyToBotMessage(conversation, replyContent.reference, worker, agentName);
+    const isReplyToBot = await isReplyToBotMessage(conversation, replyContent.reference, worker, agentName, publishableListings);
     if (isReplyToBot) {
       return { process: true, reason: "Processing reply to bot message in group" };
     }
@@ -230,7 +199,7 @@ export async function processMessage(
 export async function gatherMessageChain(
   conversation: any,
   message: DecodedMessage,
-  worker: WorkerInstance
+  _worker: WorkerInstance
 ): Promise<DecodedMessage[]> {
   const chain: DecodedMessage[] = [message];
   let currentMessage = message;
@@ -304,26 +273,46 @@ export async function isReplyToBotMessage(
   conversation: any, 
   referencedMessageId: string, 
   worker: WorkerInstance,
-  botName: string
+  _botName: string,
+  publishableListings?: Map<string, any>
 ): Promise<boolean> {
   try {
-    // Get conversation messages to find the referenced message
-    const messages = await conversation.messages({ limit: 100 });
+    logger.debug(`[${worker.name}] Looking for referenced message: ${referencedMessageId}`);
+    
+    // Get conversation messages to find the referenced message - increased limit
+    const messages = await conversation.messages({ limit: 200 });
+    logger.debug(`[${worker.name}] Retrieved ${messages.length} messages from conversation`);
+    
+    // Debug: log recent message IDs
+    const recentIds = messages.slice(0, 10).map((msg: any) => msg.id.substring(0, 8));
+    logger.debug(`[${worker.name}] Recent message IDs: ${recentIds.join(', ')}`);
+    
     const referencedMessage = messages.find((msg: any) => msg.id === referencedMessageId);
     
     if (!referencedMessage) {
-      logger.debug(`[${worker.name}] Referenced message ${referencedMessageId.substring(0, 8)} not found in recent messages`);
+      logger.debug(`[${worker.name}] Referenced message ${referencedMessageId.substring(0, 8)} not found in ${messages.length} recent messages`);
+      
+      // Fallback: check if this message ID exists in our bot's approval state store
+      if (publishableListings && publishableListings.has(referencedMessageId)) {
+        logger.debug(`[${worker.name}] Found referenced message in approval state store - assuming bot message`);
+        return true;
+      }
+      
       return false;
     }
 
     // Check if the referenced message is from our bot
-    const botInboxState = await worker.client.preferences.inboxStateFromInboxIds([referencedMessage.senderInboxId]);
-    const botAddress = botInboxState[0]?.identifiers[0]?.identifier || '';
+    const referencedInboxState = await worker.client.preferences.inboxStateFromInboxIds([referencedMessage.senderInboxId]);
+    const referencedAddress = referencedInboxState[0]?.identifiers[0]?.identifier || '';
     
-    // Check if it's from the specified bot
-    const isBotMessage = botAddress === `${botName}.hopscotch.eth`;
+    // Get our bot's address to compare
+    const botInboxState = await worker.client.preferences.inboxState();
+    const botAddress = botInboxState.identifiers[0]?.identifier || '';
     
-    logger.debug(`[${worker.name}] Reply reference check - referenced message from: ${botAddress}, is bot: ${isBotMessage}`);
+    // Check if it's from our bot
+    const isBotMessage = referencedAddress === botAddress;
+    
+    logger.debug(`[${worker.name}] Reply reference check - referenced message from: ${referencedAddress}, bot address: ${botAddress}, is bot: ${isBotMessage}`);
     return isBotMessage;
     
   } catch (err) {
@@ -418,64 +407,7 @@ export async function removeReaction(conversation: any, messageId: string, emoji
   }
 }
 
-// Upload file to S3 with optional signed URL generation
-export async function uploadToS3(
-  bucket: string,
-  data: Uint8Array,
-  mimeType: string,
-  returnSignedUrl: boolean = false
-): Promise<string | null> {
-  const uploadStartTime = Date.now();
-  const key = `usercontent/${getHopscotchEnv()}/${v4()}.${mimeType.split('/')[1]}`;
 
-  logger.debug(`[agent-helpers] Uploading to S3: bucket=${bucket}, key=${key}, size=${data.length}, signedUrl=${returnSignedUrl}`);
-
-  const uploadParams: PutObjectCommandInput = {
-    Bucket: bucket,
-    Key: key,
-    Body: data,
-    ContentType: mimeType
-  };
-
-  try {
-    const upload = new Upload({
-      client: s3Client,
-      params: uploadParams,
-    });
-
-    await upload.done();
-    const uploadTime = Date.now() - uploadStartTime;
-    logger.debug(`[agent-helpers] S3 upload completed in ${uploadTime}ms`);
-
-    if (returnSignedUrl) {
-      const signedUrlStartTime = Date.now();
-      const command = new GetObjectCommand({ Bucket: bucket, Key: key });
-      const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: InSeconds.FifteenMinutes });
-      const signedUrlTime = Date.now() - signedUrlStartTime;
-      
-      logger.debug(`[agent-helpers] Signed URL generated in ${signedUrlTime}ms`);
-      return signedUrl?.startsWith('https://') ? signedUrl : null;
-    }
-
-    const publicUrl = `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
-    logger.debug(`[agent-helpers] Public URL: ${publicUrl}`);
-    return publicUrl;
-  } catch (err) {
-    const uploadTime = Date.now() - uploadStartTime;
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    logger.error(`[agent-helpers] S3 upload failed after ${uploadTime}ms: ${errorMsg}`);
-    return null;
-  }
-}
-
-// Generate product URL for different environments
-export function getProductUrl(subjectId: number): string {
-  const env = process.env.HS_ENV;
-  const subdomain = env === 'test' ? 'test.' : env === 'dev' ? 'dev.' : '';
-  const url = `https://${subdomain}hopscotch.trade/store/products/${subjectId}`;
-  logger.debug(`[agent-helpers] Generated product URL: ${url}`);
-  return url;
-}
 
 // Extract text content from text or reply messages
 export function extractTextContent(message: DecodedMessage): string {
@@ -506,24 +438,14 @@ export function extractTextContent(message: DecodedMessage): string {
   }
 }
 
-// Check if text message is tagged with agent name
-export function isTaggedMessage(text: string, agentName: string): boolean {
-  return text.includes(`@${agentName}`);
-}
-
-// Extract description by removing agent tag
-export function extractDescription(text: string, agentName: string): string {
-  const isTagged = isTaggedMessage(text, agentName);
-  return isTagged ? text.substring(`@${agentName}`.length).trim() : text.trim();
-}
 
 // Send error response and log to Influx
 export async function sendErrorResponse(
   conversation: any,
-  message: DecodedMessage,
+  _message: DecodedMessage,
   errorText: string,
-  agentName: string,
-  isDM: boolean
+  _agentName: string,
+  _isDM: boolean
 ): Promise<void> {
   try {
     await conversation.send(errorText);
@@ -542,8 +464,8 @@ export async function gatherMessageContent(
   let image: DecodedMessage<any> | undefined;
   const textParts: string[] = [];
   
-  // Add the current message's text, cleaned of the @deal tag
-  const cleanedText = description.replace('@deal', '').trim();
+  // Add the current message's text, cleaned of bot tags
+  const cleanedText = cleanTagFromText(description, botTags);
   if (cleanedText) {
     textParts.push(cleanedText); // Add current message text first
     logger.debug(`[gatherMessageContent] Added current message text: "${cleanedText}"`);

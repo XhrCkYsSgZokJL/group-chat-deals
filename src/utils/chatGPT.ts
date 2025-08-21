@@ -1,6 +1,6 @@
 import { errorString, getLogger } from '@hopscotch-trading/js-commons-core/utils';
 import OpenAI from 'openai';
-import { assistantIds, listingsDesc, listingsModel, listingsName, listingsPrompt, listingsSchema } from './constants';
+import { listingsDesc, listingsModel, listingsName, listingsPrompt, listingsSchema, modificationPromptTemplate, modificationSystemPrompt, imagePromptTemplate } from './constants';
 import { QuerySell } from '../../types';
 
 const logger = getLogger('utils/chatGPT');
@@ -8,7 +8,6 @@ const logger = getLogger('utils/chatGPT');
 // OpenAI client and state
 let chatGPT: OpenAI;
 let initialized: boolean = false;
-const assistants: { [id: string]: OpenAI.Beta.Assistant } = {};
 
 // Initialize open ai client
 export function initializeOpenAi(): void {
@@ -19,23 +18,6 @@ export function initializeOpenAi(): void {
   }
 }
 
-// Initialize and cache assistant
-export async function initializeAssistant(name: keyof typeof assistantIds): Promise<void> {
-  const assistantId = assistantIds[name];
-  if (!assistants[assistantId]) {
-    logger.info(`Initializing assistant ${name} ${assistantId}`);
-    assistants[assistantId] = await chatGPT.beta.assistants.retrieve(assistantId);
-  }
-}
-
-// Get cached assistant
-export function getAssistant(name: keyof typeof assistantIds) {
-  const assistantId = assistantIds[name];
-  if (!assistants[assistantId]) {
-    throw new Error(`Assistant ${name} not initialized`);
-  }
-  return assistants[assistantId];
-}
 
 export async function queryListings({
   text,
@@ -46,6 +28,9 @@ export async function queryListings({
   }
 
   try {
+    // Log the input text being sent to ChatGPT
+    logger.info(`📝 LISTING REQUEST TEXT: ${text}`);
+    
     // Build the content array dynamically
     const contentArray: any[] = [
       {
@@ -55,16 +40,16 @@ export async function queryListings({
     ];
 
     // Only add image_url if image is provided and valid
-    if (image && image.startsWith('https://')) {
+    if (image && typeof image === 'string' && image.startsWith('https://')) {
       contentArray.push({
         type: 'image_url',
         image_url: {
           url: image,
         },
       });
-      logger.debug('Including image in listings query:', image.substring(0, 50));
+      logger.info(`🖼️ LISTING REQUEST IMAGE: ${image}`);
     } else {
-      logger.debug('Processing text-only listing query');
+      logger.info('📄 Processing text-only listing query');
     }
 
     const response = await chatGPT.chat.completions.create({
@@ -94,12 +79,99 @@ export async function queryListings({
     });
 
     const result = response.choices[0]?.message?.tool_calls?.[0]?.function?.arguments;
-    logger.debug('OpenAi listing result: %s', result);
+    logger.info(`✅ LISTING RESPONSE RAW: ${result}`);
     const parsed = JSON.parse(result ?? '{}');
+    logger.info(`📋 LISTING RESPONSE PARSED: ${JSON.stringify(parsed, null, 2)}`);
     
     return parsed;
   } catch (error) {
     logger.error('OpenAi listing processing error: %s', errorString(error));
+    return 'Internal error';
+  }
+}
+
+// Query listings with existing listing data for modifications
+export async function queryListingsWithContext({
+  text,
+  image,
+  existingListing,
+}: QuerySell & { existingListing?: any }): Promise<any> {
+  if (!initialized) {
+    throw new Error('OpenAi not initialized');
+  }
+
+  try {
+    // Create a context-aware prompt that includes existing listing data
+    let contextText = text;
+    if (existingListing) {
+      contextText = modificationPromptTemplate
+        .replace('{text}', text)
+        .replace('{title}', existingListing.title || 'N/A')
+        .replace('{description}', existingListing.description || 'N/A')
+        .replace('{priceValue}', existingListing.priceValue || 'N/A')
+        .replace('{priceAsset}', existingListing.priceAsset || 'USDC')
+        .replace('{inventory}', (existingListing.inventory || 1).toString())
+        .replace('{deliverable}', existingListing.deliverable ? 'Yes' : 'No')
+        .replace('{pickupZip}', existingListing.pickupZip || 'Not specified');
+    }
+    
+    logger.info(`📝 MODIFICATION REQUEST TEXT: ${contextText}`);
+    
+    // Build the content array dynamically
+    const contentArray: any[] = [
+      {
+        type: 'text',
+        text: contextText,
+      },
+    ];
+
+    // Only add image_url if image is provided and valid
+    if (image && typeof image === 'string' && image.startsWith('https://')) {
+      contentArray.push({
+        type: 'image_url',
+        image_url: {
+          url: image,
+        },
+      });
+      logger.info(`🖼️ MODIFICATION REQUEST IMAGE: ${image}`);
+    } else {
+      logger.info('📄 Processing text-only modification query');
+    }
+
+    const response = await chatGPT.chat.completions.create({
+      model: listingsModel,
+      messages: [
+        {
+          role: 'system',
+          content: listingsPrompt + modificationSystemPrompt,
+        },
+        {
+          role: 'user',
+          content: contentArray,
+        },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: listingsName,
+            description: listingsDesc,
+            parameters: listingsSchema,
+          },
+        },
+      ],
+      tool_choice: { type: 'function', function: { name: listingsName } },
+      max_tokens: 1500,
+    });
+
+    const result = response.choices[0]?.message?.tool_calls?.[0]?.function?.arguments;
+    logger.info(`✅ MODIFICATION RESPONSE RAW: ${result}`);
+    const parsed = JSON.parse(result ?? '{}');
+    logger.info(`📋 MODIFICATION RESPONSE PARSED: ${JSON.stringify(parsed, null, 2)}`);
+    
+    return parsed;
+  } catch (error) {
+    logger.error('OpenAi modification processing error: %s', errorString(error));
     return 'Internal error';
   }
 }
@@ -111,12 +183,12 @@ export async function generateProductImage(description: string): Promise<string 
   }
 
   try {
-    logger.debug('Generating product image with DALL-E for description:', description.substring(0, 100));
+    logger.info(`🎨 IMAGE GENERATION REQUEST: ${description}`);
     
     // Create a more descriptive prompt for product images
-    const prompt = `Create a clean, professional product image for: ${description}. 
-    Style: Product photography, white or clean background, well-lit, high quality, commercial style. 
-    Focus on making the product look appealing and professional for an e-commerce listing.`;
+    const prompt = imagePromptTemplate.replace('{description}', description);
+    
+    logger.info(`🖼️ DALL-E PROMPT: ${prompt.substring(0, 200)}`);
 
     const imageResponse = await chatGPT.images.generate({
       model: "dall-e-3",
@@ -138,7 +210,7 @@ export async function generateProductImage(description: string): Promise<string 
       return null;
     }
 
-    logger.info(`Product image generated successfully: ${imageUrl.substring(0, 50)}...`);
+    logger.info(`✅ IMAGE GENERATED: ${imageUrl}`);
     return imageUrl;
 
   } catch (error) {
